@@ -61,8 +61,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+    const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -73,45 +72,37 @@ function App() {
   const [useIndexSearch, setUseIndexSearch] = useState(true);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [showPaths, setShowPaths] = useState(false);
-  const [focusMode, setFocusMode] = useState(false);
-  const [isCollapsed, setIsCollapsed] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenu | null>(null);
   const [appZoom, setAppZoom] = useState(1);
-  const expandedSizeRef = useRef({ width: 700, height: 600 });
-  const pinnedPathsRef = useRef<Record<string, string>>({});
-  const cardsRef = useRef<HTMLDivElement>(null);
+  const [focusMode, setFocusMode] = useState(false);
+  const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const indexSearchRequestIdRef = useRef(0);
+  const collapseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load saved window size on mount
+  // Derived focus mode states
+  const isCollapsed = focusMode && expandedCardId === null;
+  const isExpanded = focusMode && expandedCardId !== null;
+
+  // Save window size when resized
   useEffect(() => {
-    const savedSize = localStorage.getItem('spyglass-window-size');
-    if (savedSize) {
-      try {
-        const { width, height } = JSON.parse(savedSize);
-        expandedSizeRef.current = { width, height };
-        // Apply saved size to window
-        const win = getCurrentWindow();
-        win.setSize(new LogicalSize(width, height));
-      } catch (e) {
-        console.error('Failed to restore window size:', e);
-      }
-    }
-  }, []);
-
-  // Save window size when resized (not in pin mode)
-  useEffect(() => {
-    if (focusMode) return;
-
     let resizeTimeout: ReturnType<typeof setTimeout>;
-    const handleResize = async () => {
+    const handleResize = () => {
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(async () => {
         try {
           const win = getCurrentWindow();
           const size = await win.innerSize();
-          expandedSizeRef.current = { width: size.width, height: size.height };
-          localStorage.setItem('spyglass-window-size', JSON.stringify({ width: size.width, height: size.height }));
+          // Save to the appropriate storage key based on focus mode state
+          if (focusMode) {
+            if (expandedCardId) {
+              localStorage.setItem('spyglass-focus-expanded-size', JSON.stringify({ width: size.width, height: size.height }));
+            } else {
+              localStorage.setItem('spyglass-focus-collapsed-size', JSON.stringify({ width: size.width, height: size.height }));
+            }
+          } else {
+            localStorage.setItem('spyglass-window-size', JSON.stringify({ width: size.width, height: size.height }));
+          }
         } catch (e) {
           console.error('Failed to save window size:', e);
         }
@@ -123,7 +114,7 @@ function App() {
       window.removeEventListener('resize', handleResize);
       clearTimeout(resizeTimeout);
     };
-  }, [focusMode]);
+  }, [focusMode, expandedCardId]);
 
   const activeTab = tabs.find(t => t.id === activeTabId);
   const currentPath = activeTab?.path || '';
@@ -148,10 +139,6 @@ function App() {
     return { folders, files, ordered: [...folders, ...files] };
   }, [indexedResults, searchQuery, useIndexSearch]);
 
-  const visibleEntries = useMemo(() => {
-    if (useIndexSearch && searchQuery) return indexedGroups.ordered;
-    return filteredEntries;
-  }, [filteredEntries, indexedGroups.ordered, searchQuery, useIndexSearch]);
 
   // Save state to config
   const saveState = useCallback(async (newTabs: Tab[], newActiveId: string) => {
@@ -176,7 +163,6 @@ function App() {
     setLoading(true);
     setError(null);
     setSearchQuery('');
-    setSelectedIndex(0);
     try {
       const result = await invoke<FileEntry[]>('read_directory', { path });
       setEntries(result);
@@ -213,55 +199,6 @@ function App() {
     }
   }, [currentPath, navigateTo]);
 
-  const collapseToCards = useCallback(async () => {
-    const win = getCurrentWindow();
-    const currentSize = await win.innerSize();
-
-    // Wait for DOM to update, then measure and resize
-    requestAnimationFrame(() => {
-      requestAnimationFrame(async () => {
-        if (cardsRef.current) {
-          const cardsHeight = cardsRef.current.getBoundingClientRect().height;
-          const newHeight = Math.max(80, Math.ceil(cardsHeight) + 28);
-          await win.setSize(new LogicalSize(currentSize.width, newHeight));
-        }
-      });
-    });
-  }, []);
-
-  const expandToFull = useCallback(async () => {
-    const win = getCurrentWindow();
-    await win.setSize(new LogicalSize(expandedSizeRef.current.width, expandedSizeRef.current.height));
-  }, []);
-
-  const toggleFocusMode = useCallback(async () => {
-    const win = getCurrentWindow();
-
-    if (focusMode) {
-      // Exiting focus mode - restore expanded size
-      setIsCollapsed(false);
-      setFocusMode(false);
-      pinnedPathsRef.current = {};
-      await expandToFull();
-    } else {
-      // Entering focus mode - save current size first
-      const currentSize = await win.innerSize();
-      expandedSizeRef.current = { width: currentSize.width, height: currentSize.height };
-      localStorage.setItem('spyglass-window-size', JSON.stringify({ width: currentSize.width, height: currentSize.height }));
-
-      // Pin current paths
-      const pinned: Record<string, string> = {};
-      tabs.forEach(tab => {
-        pinned[tab.id] = tab.path;
-      });
-      pinnedPathsRef.current = pinned;
-
-      // Set state and collapse
-      setFocusMode(true);
-      setIsCollapsed(true);
-      await collapseToCards();
-    }
-  }, [focusMode, tabs, collapseToCards, expandToFull]);
 
   // Open path in new window
   const openInNewWindow = useCallback(async (path: string) => {
@@ -294,6 +231,58 @@ function App() {
       copyTimeoutRef.current = null;
     }, delayMs);
   }, []);
+
+  // Focus mode window sizing helpers
+  const resizeWindowTo = useCallback(async (width: number, height: number) => {
+    try {
+      const win = getCurrentWindow();
+      await win.setSize(new LogicalSize(width, height));
+    } catch (e) {
+      console.error('Failed to resize window:', e);
+    }
+  }, []);
+
+  const getStoredSize = useCallback((key: string, defaultWidth: number, defaultHeight: number) => {
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch {
+        return { width: defaultWidth, height: defaultHeight };
+      }
+    }
+    return { width: defaultWidth, height: defaultHeight };
+  }, []);
+
+  // Collapse timer helpers
+  const cancelCollapseTimer = useCallback(() => {
+    if (collapseTimeoutRef.current) {
+      clearTimeout(collapseTimeoutRef.current);
+      collapseTimeoutRef.current = null;
+    }
+  }, []);
+
+  const startCollapseTimer = useCallback(() => {
+    // Don't collapse if context menu is open
+    if (contextMenu || tabContextMenu) return;
+
+    cancelCollapseTimer();
+    collapseTimeoutRef.current = setTimeout(async () => {
+      // Save current expanded size before collapsing
+      try {
+        const win = getCurrentWindow();
+        const size = await win.innerSize();
+        localStorage.setItem('spyglass-focus-expanded-size', JSON.stringify({ width: size.width, height: size.height }));
+      } catch (e) {
+        console.error('Failed to save expanded size:', e);
+      }
+
+      // Collapse
+      setExpandedCardId(null);
+      const collapsedSize = getStoredSize('spyglass-focus-collapsed-size', 400, 60);
+      resizeWindowTo(collapsedSize.width, collapsedSize.height);
+    }, 300);
+  }, [contextMenu, tabContextMenu, cancelCollapseTimer, getStoredSize, resizeWindowTo]);
 
 
   // Handle copy
@@ -341,23 +330,14 @@ function App() {
   }, [tabs, activeTabId, loadDirectory, saveState]);
 
   // Switch tab
-  const switchTab = useCallback(async (tabId: string) => {
+  const switchTab = useCallback((tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
     if (tab) {
-      if (focusMode && isCollapsed) {
-        setIsCollapsed(false);
-        await expandToFull();
-        // Load from pinned path in focus mode
-        const pinnedPath = pinnedPathsRef.current[tabId] || tab.path;
-        setActiveTabId(tabId);
-        loadDirectory(pinnedPath);
-      } else {
-        setActiveTabId(tabId);
-        loadDirectory(tab.path);
-        saveState(tabs, tabId);
-      }
+      setActiveTabId(tabId);
+      loadDirectory(tab.path);
+      saveState(tabs, tabId);
     }
-  }, [tabs, loadDirectory, saveState, focusMode, isCollapsed, expandToFull]);
+  }, [tabs, loadDirectory, saveState]);
 
   // Change tab color
   const changeTabColor = useCallback((tabId: string, color: string) => {
@@ -471,15 +451,13 @@ function App() {
       if (copyTimeoutRef.current) {
         clearTimeout(copyTimeoutRef.current);
       }
+      if (collapseTimeoutRef.current) {
+        clearTimeout(collapseTimeoutRef.current);
+      }
     };
   }, []);
 
-  useEffect(() => {
-    setSelectedIndex((current) => {
-      if (visibleEntries.length === 0) return 0;
-      return Math.min(current, visibleEntries.length - 1);
-    });
-  }, [visibleEntries.length]);
+
 
   // Theme handling
   useEffect(() => {
@@ -538,6 +516,39 @@ function App() {
       return !prev;
     });
   }, []);
+
+  // Focus mode toggle
+  const toggleFocusMode = useCallback(async () => {
+    const win = getCurrentWindow();
+    const currentSize = await win.innerSize();
+
+    if (focusMode) {
+      // Exit focus mode - restore normal window size
+      cancelCollapseTimer();
+      setExpandedCardId(null);
+      setFocusMode(false);
+      const normalSize = getStoredSize('spyglass-window-size', 700, 600);
+      resizeWindowTo(normalSize.width, normalSize.height);
+    } else {
+      // Enter focus mode - save normal size and collapse
+      localStorage.setItem('spyglass-window-size', JSON.stringify({ width: currentSize.width, height: currentSize.height }));
+      setFocusMode(true);
+      setExpandedCardId(null);
+      const collapsedSize = getStoredSize('spyglass-focus-collapsed-size', 400, 60);
+      resizeWindowTo(collapsedSize.width, collapsedSize.height);
+    }
+  }, [focusMode, cancelCollapseTimer, getStoredSize, resizeWindowTo]);
+
+  // Handle card click in focus mode
+  const handleFocusCardClick = useCallback(async (tab: Tab) => {
+    cancelCollapseTimer();
+    setExpandedCardId(tab.id);
+    setActiveTabId(tab.id);
+    loadDirectory(tab.path);
+    saveState(tabs, tab.id);
+    const expandedSize = getStoredSize('spyglass-focus-expanded-size', 700, 500);
+    resizeWindowTo(expandedSize.width, expandedSize.height);
+  }, [cancelCollapseTimer, loadDirectory, tabs, saveState, getStoredSize, resizeWindowTo]);
 
   // Initialize
   useEffect(() => {
@@ -644,35 +655,16 @@ function App() {
       return;
     }
 
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setSelectedIndex(i => Math.min(i + 1, Math.max(visibleEntries.length - 1, 0)));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setSelectedIndex(i => Math.max(i - 1, 0));
-    } else if (e.key === 'Enter') {
-      const selected = visibleEntries[selectedIndex];
-      if (selected) {
-        if (selected.is_directory) {
-          navigateTo(selected.path);
-        } else {
-          handleCopy(selected);
-        }
-      }
-    } else if (e.key === 'ArrowLeft') {
+    if (e.key === 'ArrowLeft') {
       navigateBack();
     } else if (e.key === 'Escape') {
       setSearchQuery('');
-      setSelectedIndex(0);
     } else if (e.key === 't' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (currentPath) openInNewTab(currentPath);
     } else if (e.key === 'w' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (activeTabId) closeTab(activeTabId);
-    } else if (e.key === 'f' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
-      e.preventDefault();
-      toggleFocusMode();
     } else if ((e.key === '=' || e.key === '+') && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       setAppZoom(z => Math.min(1.5, z + 0.1));
@@ -685,16 +677,11 @@ function App() {
     }
   }, [
     contextMenu,
-    visibleEntries,
-    selectedIndex,
-    navigateTo,
-    handleCopy,
     navigateBack,
     currentPath,
     openInNewTab,
     activeTabId,
     closeTab,
-    toggleFocusMode,
   ]);
 
   useEffect(() => {
@@ -727,10 +714,8 @@ function App() {
   // Handle context menu
   const handleContextMenu = useCallback((e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
-    if (!focusMode) {
-      setContextMenu({ x: e.clientX, y: e.clientY, entry });
-    }
-  }, [focusMode]);
+    setContextMenu({ x: e.clientX, y: e.clientY, entry });
+  }, []);
 
   // Build breadcrumb segments
   const breadcrumbSegments = useMemo(() => {
@@ -747,30 +732,13 @@ function App() {
 
   return (
     <div
-      className={`app ${focusMode ? 'focus-mode' : ''} ${focusMode && isCollapsed ? 'collapsed' : ''}`}
+      className={`app ${focusMode ? 'focus-mode' : ''} ${isCollapsed ? 'collapsed' : ''} ${isExpanded ? 'expanded' : ''}`}
       style={{ fontSize: `${appZoom * 13}px` }}
       onClick={() => { setContextMenu(null); setTabContextMenu(null); }}
-      onMouseLeave={async () => {
-        if (focusMode && !isCollapsed) {
-          // Reset to pinned path before collapsing
-          const pinnedPath = pinnedPathsRef.current[activeTabId];
-          if (pinnedPath && pinnedPath !== currentPath) {
-            const name = pinnedPath.split('/').pop() || '~';
-            const newTabs = tabs.map(t =>
-              t.id === activeTabId ? { ...t, path: pinnedPath, name } : t
-            );
-            setTabs(newTabs);
-            loadDirectory(pinnedPath);
-          }
-          setIsCollapsed(true);
-          await collapseToCards();
-        }
-      }}
     >
       {/* Pinned Cards */}
       <div
         className="pinned-cards"
-        ref={cardsRef}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
@@ -794,22 +762,32 @@ function App() {
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`card ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''}`}
+            className={`card ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''} ${expandedCardId === tab.id ? 'expanded-active' : ''}`}
             style={{ borderColor: tab.color }}
             title={tab.path}
-            onClick={() => switchTab(tab.id)}
-            draggable
+            onClick={(e) => {
+              if (focusMode) {
+                e.stopPropagation();
+                handleFocusCardClick(tab);
+              } else {
+                switchTab(tab.id);
+              }
+            }}
+            draggable={!focusMode}
             onDragStart={(e) => {
+              if (focusMode) return;
               setDraggedTabId(tab.id);
               e.dataTransfer.effectAllowed = 'move';
               e.dataTransfer.setData('text/plain', tab.id);
             }}
             onDragOver={(e) => {
+              if (focusMode) return;
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
             }}
             onDragEnd={() => setDraggedTabId(null)}
             onDrop={(e) => {
+              if (focusMode) return;
               e.preventDefault();
               e.stopPropagation();
               const fromId = e.dataTransfer.getData('text/plain');
@@ -821,16 +799,14 @@ function App() {
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              if (!focusMode) {
-                setTabContextMenu({ x: e.clientX, y: e.clientY, tab });
-              }
+              setTabContextMenu({ x: e.clientX, y: e.clientY, tab });
             }}
           >
             <svg className="card-icon" viewBox="0 0 24 24" fill={tab.color}>
               <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
             </svg>
             <span className="card-name">{tab.name}</span>
-            {tabs.length > 1 && (
+            {tabs.length > 1 && !focusMode && (
               <button
                 className="card-close"
                 onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
@@ -840,15 +816,10 @@ function App() {
             )}
           </div>
         ))}
-        <button className="card-add" onClick={() => currentPath && openInNewTab(currentPath)} title="Pin current folder">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
         <button
           className={`focus-toggle ${focusMode ? 'active' : ''}`}
           onClick={toggleFocusMode}
-          title={focusMode ? "Exit focus mode (⌘⇧F)" : "Focus mode (⌘⇧F)"}
+          title={focusMode ? "Exit focus mode" : "Focus mode"}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             {focusMode ? (
@@ -860,211 +831,307 @@ function App() {
         </button>
       </div>
 
-      {/* Breadcrumb */}
-      <div className="breadcrumb">
-        <button
-          className={`breadcrumb-back ${!currentPath ? 'disabled' : ''}`}
-          onClick={navigateBack}
-          disabled={!currentPath}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M19 12H5M12 19l-7-7 7-7" />
-          </svg>
-          <span className="breadcrumb-back-text">Back</span>
-        </button>
-        <div className="breadcrumb-path">
-          {breadcrumbSegments.map((seg, i) => (
-            <span key={seg.path}>
-              {i > 0 && <span className="breadcrumb-separator"> / </span>}
-              <span
-                className={`breadcrumb-segment ${seg.path === currentPath ? 'current' : ''}`}
-                onClick={() => seg.path !== currentPath && navigateTo(seg.path)}
-              >
-                {seg.name}
-              </span>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Search */}
-      <div className="search-bar">
-        <svg className="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <circle cx="11" cy="11" r="8" />
-          <path d="M21 21l-4.35-4.35" />
-        </svg>
-        <input
-          type="text"
-          className="search-input"
-          placeholder={useIndexSearch ? `Search ${indexCount.toLocaleString()} files...` : "Search folder..."}
-          value={searchQuery}
-          onChange={(e) => { setSearchQuery(e.target.value); setSelectedIndex(0); }}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              setSearchQuery('');
-              (e.target as HTMLInputElement).blur();
-            }
-          }}
-        />
-        {searchQuery && (
-          <button className="search-clear" onClick={() => setSearchQuery('')}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </button>
-        )}
-        <button
-          className="theme-toggle"
-          onClick={() => changeTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
-          title={`Theme: ${theme}`}
-        >
-          {theme === 'dark' ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-            </svg>
-          ) : theme === 'light' ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="5" />
-              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-            </svg>
-          ) : (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <path d="M8 21h8M12 17v4" />
-            </svg>
-          )}
-        </button>
-        <button className="settings-button" onClick={() => setShowSettings(true)} title="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-          </svg>
-        </button>
-      </div>
-
-      {/* File List */}
-      <div className="file-list">
-        {loading && !useIndexSearch ? (
-          <div className="file-list-loading">
-            <div className="loading-spinner" />
-          </div>
-        ) : error && !useIndexSearch ? (
-          <div className="file-list-error">
-            <span className="error-icon">!</span>
-            <span className="error-message">{error}</span>
-          </div>
-        ) : useIndexSearch && searchQuery ? (
-          // Indexed search results
-          (() => {
-            if (indexedResults.length === 0) {
-              return (
-                <div className="file-list-empty">
-                  {searchQuery.length < 2 ? 'Type at least 2 characters...' : 'No matches'}
-                </div>
-              );
-            }
-
-            const folders = indexedGroups.folders;
-            const files = indexedGroups.files;
-            let globalIndex = 0;
-
-            return (
-              <>
-                {folders.length > 0 && (
-                  <>
-                    <div className="file-group-header">Folders ({folders.length})</div>
-                    {folders.map((entry) => {
-                      const idx = globalIndex++;
-                      return (
-                        <div
-                          key={entry.path}
-                          className={`file-item ${idx === selectedIndex ? 'selected' : ''} ${copiedPath === entry.path ? 'copied' : ''}`}
-                          onClick={() => handleItemClick(entry)}
-                          onDoubleClick={() => handleDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenu(e, entry)}
-                        >
-                          <div className="file-item-content">
-                            <span className="file-icon">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
-                                <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
-                              </svg>
-                            </span>
-                            <div className="file-info">
-                              <span className="file-name">{entry.name}</span>
-                              {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-                {files.length > 0 && (
-                  <>
-                    <div className="file-group-header">Files ({files.length})</div>
-                    {files.map((entry) => {
-                      const idx = globalIndex++;
-                      return (
-                        <div
-                          key={entry.path}
-                          className={`file-item ${idx === selectedIndex ? 'selected' : ''} ${copiedPath === entry.path ? 'copied' : ''}`}
-                          onClick={() => handleItemClick(entry)}
-                          onDoubleClick={() => handleDoubleClick(entry)}
-                          onContextMenu={(e) => handleContextMenu(e, entry)}
-                        >
-                          <div className="file-item-content">
-                            <span className="file-icon">
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa">
-                                <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
-                              </svg>
-                            </span>
-                            <div className="file-info">
-                              <span className="file-name">{entry.name}</span>
-                              {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-              </>
-            );
-          })()
-        ) : filteredEntries.length === 0 ? (
-          <div className="file-list-empty">
-            {searchQuery ? 'No matches' : 'Empty folder'}
-          </div>
-        ) : (
-          filteredEntries.map((entry, index) => (
-            <div
-              key={entry.path}
-              className={`file-item ${index === selectedIndex ? 'selected' : ''} ${copiedPath === entry.path ? 'copied' : ''}`}
-              onClick={() => handleItemClick(entry)}
-              onDoubleClick={() => handleDoubleClick(entry)}
-              onContextMenu={(e) => handleContextMenu(e, entry)}
+      {/* Normal mode: breadcrumb + search + file list */}
+      {!focusMode && (
+        <>
+          {/* Breadcrumb */}
+          <div className="breadcrumb">
+            <button
+              className={`breadcrumb-back ${!currentPath ? 'disabled' : ''}`}
+              onClick={navigateBack}
+              disabled={!currentPath}
             >
-              <div className="file-item-content">
-                <span className="file-icon">
-                  {entry.is_directory ? (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
-                      <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa">
-                      <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
-                    </svg>
-                  )}
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
+              </svg>
+              <span className="breadcrumb-back-text">Back</span>
+            </button>
+            <div className="breadcrumb-path">
+              {breadcrumbSegments.map((seg, i) => (
+                <span key={seg.path}>
+                  {i > 0 && <span className="breadcrumb-separator"> / </span>}
+                  <span
+                    className={`breadcrumb-segment ${seg.path === currentPath ? 'current' : ''}`}
+                    onClick={() => seg.path !== currentPath && navigateTo(seg.path)}
+                  >
+                    {seg.name}
+                  </span>
                 </span>
-                <div className="file-info">
-                  <span className="file-name">{entry.name}</span>
-                  {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
+              ))}
+            </div>
+          </div>
+
+          {/* Search */}
+          <div className="search-bar">
+            <svg className="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="M21 21l-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              className="search-input"
+              placeholder={useIndexSearch ? `Search ${indexCount.toLocaleString()} files...` : "Search folder..."}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setSearchQuery('');
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+            />
+            {searchQuery && (
+              <button className="search-clear" onClick={() => setSearchQuery('')}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+            <button
+              className={`toolbar-btn ${showPaths ? 'active' : ''}`}
+              onClick={togglePaths}
+              title={showPaths ? "Hide paths" : "Show paths"}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 6h18M3 12h18M3 18h12" />
+              </svg>
+            </button>
+            <button
+              className="theme-toggle"
+              onClick={() => changeTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
+              title={`Theme: ${theme}`}
+            >
+              {theme === 'dark' ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              ) : theme === 'light' ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="5" />
+                  <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                  <path d="M8 21h8M12 17v4" />
+                </svg>
+              )}
+            </button>
+            <button className="settings-button" onClick={() => setShowSettings(true)} title="Settings">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Focus mode expanded: breadcrumb + file list with mouse tracking */}
+      {isExpanded && (
+        <div
+          className="expanded-content-area"
+          onMouseEnter={cancelCollapseTimer}
+          onMouseLeave={startCollapseTimer}
+        >
+          {/* Breadcrumb */}
+          <div className="breadcrumb">
+            <button
+              className={`breadcrumb-back ${!currentPath ? 'disabled' : ''}`}
+              onClick={navigateBack}
+              disabled={!currentPath}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
+              </svg>
+              <span className="breadcrumb-back-text">Back</span>
+            </button>
+            <div className="breadcrumb-path">
+              {breadcrumbSegments.map((seg, i) => (
+                <span key={seg.path}>
+                  {i > 0 && <span className="breadcrumb-separator"> / </span>}
+                  <span
+                    className={`breadcrumb-segment ${seg.path === currentPath ? 'current' : ''}`}
+                    onClick={() => seg.path !== currentPath && navigateTo(seg.path)}
+                  >
+                    {seg.name}
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* File List for Focus Mode Expanded */}
+          <div className="file-list">
+            {loading ? (
+              <div className="file-list-loading">
+                <div className="loading-spinner" />
+              </div>
+            ) : error ? (
+              <div className="file-list-error">
+                <span className="error-icon">!</span>
+                <span className="error-message">{error}</span>
+              </div>
+            ) : filteredEntries.length === 0 ? (
+              <div className="file-list-empty">Empty folder</div>
+            ) : (
+              filteredEntries.map((entry) => (
+                <div
+                  key={entry.path}
+                  className={`file-item ${copiedPath === entry.path ? 'copied' : ''}`}
+                  onClick={() => handleItemClick(entry)}
+                  onDoubleClick={() => handleDoubleClick(entry)}
+                  onContextMenu={(e) => handleContextMenu(e, entry)}
+                >
+                  <div className="file-item-content">
+                    <span className="file-icon">
+                      {entry.is_directory ? (
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
+                          <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                        </svg>
+                      ) : (
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa">
+                          <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
+                        </svg>
+                      )}
+                    </span>
+                    <div className="file-info">
+                      <span className="file-name">{entry.name}</span>
+                      {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* File List for Normal Mode */}
+      {!focusMode && (
+        <div className="file-list">
+          {loading && !useIndexSearch ? (
+            <div className="file-list-loading">
+              <div className="loading-spinner" />
+            </div>
+          ) : error && !useIndexSearch ? (
+            <div className="file-list-error">
+              <span className="error-icon">!</span>
+              <span className="error-message">{error}</span>
+            </div>
+          ) : useIndexSearch && searchQuery ? (
+            // Indexed search results
+            (() => {
+              if (indexedResults.length === 0) {
+                return (
+                  <div className="file-list-empty">
+                    {searchQuery.length < 2 ? 'Type at least 2 characters...' : 'No matches'}
+                  </div>
+                );
+              }
+
+              const folders = indexedGroups.folders;
+              const files = indexedGroups.files;
+              let globalIndex = 0;
+
+              return (
+                <>
+                  {folders.length > 0 && (
+                    <>
+                      <div className="file-group-header">Folders ({folders.length})</div>
+                      {folders.map((entry) => {
+                        globalIndex++;
+                        return (
+                          <div
+                            key={entry.path}
+                            className={`file-item ${copiedPath === entry.path ? 'copied' : ''}`}
+                            onClick={() => handleItemClick(entry)}
+                            onDoubleClick={() => handleDoubleClick(entry)}
+                            onContextMenu={(e) => handleContextMenu(e, entry)}
+                          >
+                            <div className="file-item-content">
+                              <span className="file-icon">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
+                                  <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                                </svg>
+                              </span>
+                              <div className="file-info">
+                                <span className="file-name">{entry.name}</span>
+                                {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                  {files.length > 0 && (
+                    <>
+                      <div className="file-group-header">Files ({files.length})</div>
+                      {files.map((entry) => {
+                        globalIndex++;
+                        return (
+                          <div
+                            key={entry.path}
+                            className={`file-item ${copiedPath === entry.path ? 'copied' : ''}`}
+                            onClick={() => handleItemClick(entry)}
+                            onDoubleClick={() => handleDoubleClick(entry)}
+                            onContextMenu={(e) => handleContextMenu(e, entry)}
+                          >
+                            <div className="file-item-content">
+                              <span className="file-icon">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa">
+                                  <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
+                                </svg>
+                              </span>
+                              <div className="file-info">
+                                <span className="file-name">{entry.name}</span>
+                                {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </>
+              );
+            })()
+          ) : filteredEntries.length === 0 ? (
+            <div className="file-list-empty">
+              {searchQuery ? 'No matches' : 'Empty folder'}
+            </div>
+          ) : (
+            filteredEntries.map((entry) => (
+              <div
+                key={entry.path}
+                className={`file-item ${copiedPath === entry.path ? 'copied' : ''}`}
+                onClick={() => handleItemClick(entry)}
+                onDoubleClick={() => handleDoubleClick(entry)}
+                onContextMenu={(e) => handleContextMenu(e, entry)}
+              >
+                <div className="file-item-content">
+                  <span className="file-icon">
+                    {entry.is_directory ? (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="#fbbf24">
+                        <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                      </svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="#60a5fa">
+                        <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
+                      </svg>
+                    )}
+                  </span>
+                  <div className="file-info">
+                    <span className="file-name">{entry.name}</span>
+                    {showPaths && <span className="file-path">{entry.path.replace(/^\/Users\/[^/]+/, '~')}</span>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
-        )}
-      </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Context Menu */}
       {contextMenu && (
