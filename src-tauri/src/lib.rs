@@ -9,6 +9,7 @@ use tauri::{Manager, State};
 #[derive(Default)]
 pub struct IndexState {
     pub entries: Mutex<Vec<IndexEntry>>,
+    pub lower_names: Mutex<Vec<String>>,
     pub progress: Mutex<IndexProgress>,
     pub is_indexing: Mutex<bool>,
 }
@@ -206,25 +207,10 @@ fn get_index_path() -> PathBuf {
     get_config_dir().join("index.json")
 }
 
-fn count_folders(path: &PathBuf, skip_hidden: bool) -> usize {
-    let mut count = 0;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if skip_hidden && name.starts_with('.') {
-                continue;
-            }
-            if entry.path().is_dir() {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
 fn index_directory(
     path: &PathBuf,
     entries: &mut Vec<IndexEntry>,
+    lower_names: &mut Vec<String>,
     progress: &Arc<Mutex<IndexProgress>>,
     skip_hidden: bool,
 ) {
@@ -254,6 +240,7 @@ fn index_directory(
 
         let file_path = entry.path();
         let is_dir = file_path.is_dir();
+        let name_lower = name.to_lowercase();
 
         entries.push(IndexEntry {
             name: name.clone(),
@@ -261,6 +248,7 @@ fn index_directory(
             is_directory: is_dir,
             parent_folder: parent_folder.clone(),
         });
+        lower_names.push(name_lower);
 
         // Update total files count less frequently (every 100 files)
         if entries.len() % 100 == 0 {
@@ -272,6 +260,9 @@ fn index_directory(
         if is_dir {
             // Skip common large/unneeded directories
             if !["node_modules", "target", ".git", "dist", "build", ".next", "vendor", "__pycache__", ".venv", "venv", ".cargo", "Library", ".Trash", "Applications"].contains(&name.as_str()) {
+                if let Ok(mut prog) = progress.lock() {
+                    prog.total_folders += 1;
+                }
                 subdirs.push(file_path);
             }
         }
@@ -285,7 +276,7 @@ fn index_directory(
 
     // Recursively index subdirectories
     for subdir in subdirs {
-        index_directory(&subdir, entries, progress, skip_hidden);
+        index_directory(&subdir, entries, lower_names, progress, skip_hidden);
     }
 }
 
@@ -310,8 +301,8 @@ fn start_indexing(app: tauri::AppHandle) -> Result<(), String> {
     // Get home directory
     let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
 
-    // Count top-level folders for progress estimation
-    let total_folders = count_folders(&home_dir, true);
+    // Initialize with the root folder, then increment as subfolders are discovered.
+    let total_folders = 1usize;
     {
         let mut progress = state.progress.lock().map_err(|e| e.to_string())?;
         progress.total_folders = total_folders.max(1);
@@ -322,6 +313,7 @@ fn start_indexing(app: tauri::AppHandle) -> Result<(), String> {
     thread::spawn(move || {
         let state: State<'_, IndexState> = app_handle.state();
         let mut new_entries = Vec::new();
+        let mut new_lower_names = Vec::new();
 
         // Use the state's progress directly wrapped in Arc for the indexing function
         let progress_arc = Arc::new(Mutex::new(IndexProgress {
@@ -357,12 +349,14 @@ fn start_indexing(app: tauri::AppHandle) -> Result<(), String> {
             }
         });
 
-        index_directory(&home_dir, &mut new_entries, &progress_arc, true);
+        index_directory(&home_dir, &mut new_entries, &mut new_lower_names, &progress_arc, true);
+
+        let total_files = new_entries.len();
 
         // Mark complete
         if let Ok(mut prog) = progress_arc.lock() {
             prog.is_complete = true;
-            prog.total_files = new_entries.len();
+            prog.total_files = total_files;
         }
 
         // Wait for sync thread to finish
@@ -370,12 +364,16 @@ fn start_indexing(app: tauri::AppHandle) -> Result<(), String> {
 
         // Update the state with results
         if let Ok(mut entries) = state.entries.lock() {
-            *entries = new_entries.clone();
+            *entries = new_entries;
+        }
+
+        if let Ok(mut lower_names) = state.lower_names.lock() {
+            *lower_names = new_lower_names;
         }
 
         if let Ok(mut progress) = state.progress.lock() {
             progress.is_complete = true;
-            progress.total_files = new_entries.len();
+            progress.total_files = total_files;
         }
 
         if let Ok(mut is_indexing) = state.is_indexing.lock() {
@@ -384,10 +382,12 @@ fn start_indexing(app: tauri::AppHandle) -> Result<(), String> {
 
         // Save index to disk
         let index_path = get_index_path();
-        if let Ok(content) = serde_json::to_string(&new_entries) {
-            let _ = fs::create_dir_all(get_config_dir());
-            let _ = fs::write(index_path, content);
-        }
+        if let Ok(entries) = state.entries.lock() {
+            if let Ok(content) = serde_json::to_string(&*entries) {
+                let _ = fs::create_dir_all(get_config_dir());
+                let _ = fs::write(index_path, content);
+            }
+        };
     });
 
     Ok(())
@@ -406,22 +406,32 @@ fn search_index(state: State<'_, IndexState>, query: String) -> Vec<IndexEntry> 
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
+    let lower_names = match state.lower_names.lock() {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
 
     if query.is_empty() {
         return Vec::new();
     }
 
     let query_lower = query.to_lowercase();
+    let query_dash = format!("-{}", query_lower);
+    let query_underscore = format!("_{}", query_lower);
+    let use_lower = lower_names.len() == entries.len();
 
     // Collect matching entries with a score
-    let mut scored: Vec<(i32, &IndexEntry)> = entries.iter()
-        .filter(|e| e.name.to_lowercase().contains(&query_lower))
-        .map(|e| {
-            let name_lower = e.name.to_lowercase();
+    let mut scored: Vec<(i32, &IndexEntry)> = Vec::new();
+    if use_lower {
+        for (idx, e) in entries.iter().enumerate() {
+            let name_lower = &lower_names[idx];
+            if !name_lower.contains(&query_lower) {
+                continue;
+            }
             let mut score = 0;
 
             // Exact match gets highest score
-            if name_lower == query_lower {
+            if name_lower == &query_lower {
                 score += 1000;
             }
             // Starts with query gets high score
@@ -429,8 +439,8 @@ fn search_index(state: State<'_, IndexState>, query: String) -> Vec<IndexEntry> 
                 score += 500;
             }
             // Query at word boundary (after - or _)
-            else if name_lower.contains(&format!("-{}", query_lower))
-                 || name_lower.contains(&format!("_{}", query_lower)) {
+            else if name_lower.contains(&query_dash)
+                 || name_lower.contains(&query_underscore) {
                 score += 300;
             }
 
@@ -447,9 +457,39 @@ fn search_index(state: State<'_, IndexState>, query: String) -> Vec<IndexEntry> 
                 score += 100;
             }
 
-            (score, e)
-        })
-        .collect();
+            scored.push((score, e));
+        }
+    } else {
+        for e in entries.iter() {
+            let name_lower = e.name.to_lowercase();
+            if !name_lower.contains(&query_lower) {
+                continue;
+            }
+            let mut score = 0;
+
+            if name_lower == query_lower {
+                score += 1000;
+            } else if name_lower.starts_with(&query_lower) {
+                score += 500;
+            } else if name_lower.contains(&query_dash)
+                || name_lower.contains(&query_underscore)
+            {
+                score += 300;
+            }
+
+            if e.is_directory {
+                score += 200;
+            }
+
+            score += 50 - (e.name.len() as i32).min(50);
+
+            if e.path.contains("/projects/") {
+                score += 100;
+            }
+
+            scored.push((score, e));
+        }
+    }
 
     // Sort by score descending
     scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -473,9 +513,13 @@ fn load_saved_index(state: State<'_, IndexState>) -> bool {
         Ok(content) => {
             match serde_json::from_str::<Vec<IndexEntry>>(&content) {
                 Ok(entries) => {
+                    let lower_names = entries.iter().map(|e| e.name.to_lowercase()).collect::<Vec<_>>();
                     if let Ok(mut state_entries) = state.entries.lock() {
                         let count = entries.len();
                         *state_entries = entries;
+                        if let Ok(mut state_lower_names) = state.lower_names.lock() {
+                            *state_lower_names = lower_names;
+                        }
 
                         // Update progress to show loaded state
                         if let Ok(mut progress) = state.progress.lock() {

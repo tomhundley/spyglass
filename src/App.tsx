@@ -76,8 +76,54 @@ function App() {
   const [focusMode, setFocusMode] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenu | null>(null);
+  const [appZoom, setAppZoom] = useState(1);
   const expandedSizeRef = useRef({ width: 700, height: 600 });
-  const collapsedHeightRef = useRef(100);
+  const pinnedPathsRef = useRef<Record<string, string>>({});
+  const cardsRef = useRef<HTMLDivElement>(null);
+  const copyTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const indexSearchRequestIdRef = useRef(0);
+
+  // Load saved window size on mount
+  useEffect(() => {
+    const savedSize = localStorage.getItem('spyglass-window-size');
+    if (savedSize) {
+      try {
+        const { width, height } = JSON.parse(savedSize);
+        expandedSizeRef.current = { width, height };
+        // Apply saved size to window
+        const win = getCurrentWindow();
+        win.setSize(new LogicalSize(width, height));
+      } catch (e) {
+        console.error('Failed to restore window size:', e);
+      }
+    }
+  }, []);
+
+  // Save window size when resized (not in pin mode)
+  useEffect(() => {
+    if (focusMode) return;
+
+    let resizeTimeout: ReturnType<typeof setTimeout>;
+    const handleResize = async () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(async () => {
+        try {
+          const win = getCurrentWindow();
+          const size = await win.innerSize();
+          expandedSizeRef.current = { width: size.width, height: size.height };
+          localStorage.setItem('spyglass-window-size', JSON.stringify({ width: size.width, height: size.height }));
+        } catch (e) {
+          console.error('Failed to save window size:', e);
+        }
+      }, 500);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(resizeTimeout);
+    };
+  }, [focusMode]);
 
   const activeTab = tabs.find(t => t.id === activeTabId);
   const currentPath = activeTab?.path || '';
@@ -87,11 +133,25 @@ function App() {
     return new Fuse(entries, { keys: ['name'], threshold: 0.4 });
   }, [entries]);
 
-  // Memoize filtered entries
+  // Memoize filtered entries (skip local search when using the full index)
   const filteredEntries = useMemo(() => {
-    if (!searchQuery) return entries;
+    if (!searchQuery || (useIndexSearch && searchQuery)) return entries;
     return fuse.search(searchQuery).map(r => r.item);
-  }, [entries, fuse, searchQuery]);
+  }, [entries, fuse, searchQuery, useIndexSearch]);
+
+  const indexedGroups = useMemo(() => {
+    if (!useIndexSearch || !searchQuery) {
+      return { folders: [] as IndexEntry[], files: [] as IndexEntry[], ordered: [] as IndexEntry[] };
+    }
+    const folders = indexedResults.filter(e => e.is_directory);
+    const files = indexedResults.filter(e => !e.is_directory);
+    return { folders, files, ordered: [...folders, ...files] };
+  }, [indexedResults, searchQuery, useIndexSearch]);
+
+  const visibleEntries = useMemo(() => {
+    if (useIndexSearch && searchQuery) return indexedGroups.ordered;
+    return filteredEntries;
+  }, [filteredEntries, indexedGroups.ordered, searchQuery, useIndexSearch]);
 
   // Save state to config
   const saveState = useCallback(async (newTabs: Tab[], newActiveId: string) => {
@@ -153,40 +213,55 @@ function App() {
     }
   }, [currentPath, navigateTo]);
 
-  // Focus mode window operations
-  const collapseWindow = useCallback(async () => {
+  const collapseToCards = useCallback(async () => {
     const win = getCurrentWindow();
-    try {
-      const size = await win.innerSize();
-      expandedSizeRef.current = { width: size.width, height: size.height };
-      await win.setSize(new LogicalSize(size.width, collapsedHeightRef.current));
-      setIsCollapsed(true);
-    } catch (e) {
-      console.error('Failed to collapse window:', e);
-    }
+    const currentSize = await win.innerSize();
+
+    // Wait for DOM to update, then measure and resize
+    requestAnimationFrame(() => {
+      requestAnimationFrame(async () => {
+        if (cardsRef.current) {
+          const cardsHeight = cardsRef.current.getBoundingClientRect().height;
+          const newHeight = Math.max(80, Math.ceil(cardsHeight) + 28);
+          await win.setSize(new LogicalSize(currentSize.width, newHeight));
+        }
+      });
+    });
   }, []);
 
-  const expandWindow = useCallback(async () => {
+  const expandToFull = useCallback(async () => {
     const win = getCurrentWindow();
-    try {
-      await win.setSize(new LogicalSize(expandedSizeRef.current.width, expandedSizeRef.current.height));
-      setIsCollapsed(false);
-    } catch (e) {
-      console.error('Failed to expand window:', e);
-    }
+    await win.setSize(new LogicalSize(expandedSizeRef.current.width, expandedSizeRef.current.height));
   }, []);
 
   const toggleFocusMode = useCallback(async () => {
+    const win = getCurrentWindow();
+
     if (focusMode) {
-      // Exiting focus mode - expand and disable
-      await expandWindow();
+      // Exiting focus mode - restore expanded size
+      setIsCollapsed(false);
       setFocusMode(false);
+      pinnedPathsRef.current = {};
+      await expandToFull();
     } else {
-      // Entering focus mode - collapse and enable
+      // Entering focus mode - save current size first
+      const currentSize = await win.innerSize();
+      expandedSizeRef.current = { width: currentSize.width, height: currentSize.height };
+      localStorage.setItem('spyglass-window-size', JSON.stringify({ width: currentSize.width, height: currentSize.height }));
+
+      // Pin current paths
+      const pinned: Record<string, string> = {};
+      tabs.forEach(tab => {
+        pinned[tab.id] = tab.path;
+      });
+      pinnedPathsRef.current = pinned;
+
+      // Set state and collapse
       setFocusMode(true);
-      await collapseWindow();
+      setIsCollapsed(true);
+      await collapseToCards();
     }
-  }, [focusMode, collapseWindow, expandWindow]);
+  }, [focusMode, tabs, collapseToCards, expandToFull]);
 
   // Open path in new window
   const openInNewWindow = useCallback(async (path: string) => {
@@ -210,44 +285,27 @@ function App() {
     }
   }, []);
 
-  // Save collapsed height when user resizes in focus mode
-  useEffect(() => {
-    if (!focusMode || !isCollapsed) return;
+  const scheduleCopyReset = useCallback((delayMs: number) => {
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current);
+    }
+    copyTimeoutRef.current = window.setTimeout(() => {
+      setCopiedPath(null);
+      copyTimeoutRef.current = null;
+    }, delayMs);
+  }, []);
 
-    let resizeTimeout: ReturnType<typeof setTimeout>;
-    const handleResize = async () => {
-      clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(async () => {
-        try {
-          const win = getCurrentWindow();
-          const size = await win.innerSize();
-          collapsedHeightRef.current = size.height;
-        } catch (e) {
-          console.error('Failed to save collapsed height:', e);
-        }
-      }, 200);
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      clearTimeout(resizeTimeout);
-    };
-  }, [focusMode, isCollapsed]);
 
   // Handle copy
   const handleCopy = useCallback(async (entry: FileEntry) => {
     try {
       await writeText(entry.path);
       setCopiedPath(entry.path);
-      if (focusMode && !isCollapsed) {
-        setTimeout(() => collapseWindow(), 200);
-      }
-      setTimeout(() => setCopiedPath(null), 200);
+      scheduleCopyReset(200);
     } catch (e) {
       console.error('Copy failed:', e);
     }
-  }, [focusMode, isCollapsed, collapseWindow]);
+  }, [scheduleCopyReset]);
 
   // Open in new tab
   const openInNewTab = useCallback((path: string, color?: string) => {
@@ -283,17 +341,23 @@ function App() {
   }, [tabs, activeTabId, loadDirectory, saveState]);
 
   // Switch tab
-  const switchTab = useCallback((tabId: string) => {
+  const switchTab = useCallback(async (tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
     if (tab) {
       if (focusMode && isCollapsed) {
-        expandWindow();
+        setIsCollapsed(false);
+        await expandToFull();
+        // Load from pinned path in focus mode
+        const pinnedPath = pinnedPathsRef.current[tabId] || tab.path;
+        setActiveTabId(tabId);
+        loadDirectory(pinnedPath);
+      } else {
+        setActiveTabId(tabId);
+        loadDirectory(tab.path);
+        saveState(tabs, tabId);
       }
-      setActiveTabId(tabId);
-      loadDirectory(tab.path);
-      saveState(tabs, tabId);
     }
-  }, [tabs, loadDirectory, saveState, focusMode, isCollapsed, expandWindow]);
+  }, [tabs, loadDirectory, saveState, focusMode, isCollapsed, expandToFull]);
 
   // Change tab color
   const changeTabColor = useCallback((tabId: string, color: string) => {
@@ -356,10 +420,13 @@ function App() {
       setIndexedResults([]);
       return;
     }
+    const requestId = ++indexSearchRequestIdRef.current;
     try {
       const results = await invoke<IndexEntry[]>('search_index', { query });
+      if (requestId !== indexSearchRequestIdRef.current) return;
       setIndexedResults(results);
     } catch (e) {
+      if (requestId !== indexSearchRequestIdRef.current) return;
       console.error('Search failed:', e);
     }
   }, []);
@@ -367,6 +434,7 @@ function App() {
   // Debounced index search
   useEffect(() => {
     if (!useIndexSearch || !searchQuery) {
+      indexSearchRequestIdRef.current += 1;
       setIndexedResults([]);
       return;
     }
@@ -397,6 +465,21 @@ function App() {
     }
     loadIndex();
   }, [startIndexing]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setSelectedIndex((current) => {
+      if (visibleEntries.length === 0) return 0;
+      return Math.min(current, visibleEntries.length - 1);
+    });
+  }, [visibleEntries.length]);
 
   // Theme handling
   useEffect(() => {
@@ -551,51 +634,73 @@ function App() {
 
     init();
     return () => { mounted = false; };
-  }, [loadDirectory, saveState]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keyboard handler
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      if (contextMenu) {
-        if (e.key === 'Escape') setContextMenu(null);
-        return;
-      }
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSelectedIndex(i => Math.min(i + 1, filteredEntries.length - 1));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSelectedIndex(i => Math.max(i - 1, 0));
-      } else if (e.key === 'Enter') {
-        const selected = filteredEntries[selectedIndex];
-        if (selected) {
-          if (selected.is_directory) {
-            navigateTo(selected.path);
-          } else {
-            handleCopy(selected);
-          }
-        }
-      } else if (e.key === 'ArrowLeft') {
-        navigateBack();
-      } else if (e.key === 'Escape') {
-        setSearchQuery('');
-        setSelectedIndex(0);
-      } else if (e.key === 't' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        if (currentPath) openInNewTab(currentPath);
-      } else if (e.key === 'w' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        if (activeTabId) closeTab(activeTabId);
-      } else if (e.key === 'f' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
-        e.preventDefault();
-        toggleFocusMode();
-      }
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (contextMenu) {
+      if (e.key === 'Escape') setContextMenu(null);
+      return;
     }
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [filteredEntries, selectedIndex, handleCopy, navigateTo, navigateBack, contextMenu, currentPath, openInNewTab, closeTab, activeTabId, toggleFocusMode]);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelectedIndex(i => Math.min(i + 1, Math.max(visibleEntries.length - 1, 0)));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelectedIndex(i => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      const selected = visibleEntries[selectedIndex];
+      if (selected) {
+        if (selected.is_directory) {
+          navigateTo(selected.path);
+        } else {
+          handleCopy(selected);
+        }
+      }
+    } else if (e.key === 'ArrowLeft') {
+      navigateBack();
+    } else if (e.key === 'Escape') {
+      setSearchQuery('');
+      setSelectedIndex(0);
+    } else if (e.key === 't' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (currentPath) openInNewTab(currentPath);
+    } else if (e.key === 'w' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (activeTabId) closeTab(activeTabId);
+    } else if (e.key === 'f' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+      e.preventDefault();
+      toggleFocusMode();
+    } else if ((e.key === '=' || e.key === '+') && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setAppZoom(z => Math.min(1.5, z + 0.1));
+    } else if (e.key === '-' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setAppZoom(z => Math.max(0.7, z - 0.1));
+    } else if (e.key === '0' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setAppZoom(1);
+    }
+  }, [
+    contextMenu,
+    visibleEntries,
+    selectedIndex,
+    navigateTo,
+    handleCopy,
+    navigateBack,
+    currentPath,
+    openInNewTab,
+    activeTabId,
+    closeTab,
+    toggleFocusMode,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
 
   // Close context menus on click outside
   useEffect(() => {
@@ -641,34 +746,75 @@ function App() {
   }, [currentPath]);
 
   return (
-    <div className={`app ${focusMode ? 'focus-mode' : ''} ${focusMode && isCollapsed ? 'collapsed' : ''}`} onClick={() => { setContextMenu(null); setTabContextMenu(null); }}>
-      {/* Tab Bar */}
-      <div className="tab-bar">
+    <div
+      className={`app ${focusMode ? 'focus-mode' : ''} ${focusMode && isCollapsed ? 'collapsed' : ''}`}
+      style={{ fontSize: `${appZoom * 13}px` }}
+      onClick={() => { setContextMenu(null); setTabContextMenu(null); }}
+      onMouseLeave={async () => {
+        if (focusMode && !isCollapsed) {
+          // Reset to pinned path before collapsing
+          const pinnedPath = pinnedPathsRef.current[activeTabId];
+          if (pinnedPath && pinnedPath !== currentPath) {
+            const name = pinnedPath.split('/').pop() || '~';
+            const newTabs = tabs.map(t =>
+              t.id === activeTabId ? { ...t, path: pinnedPath, name } : t
+            );
+            setTabs(newTabs);
+            loadDirectory(pinnedPath);
+          }
+          setIsCollapsed(true);
+          await collapseToCards();
+        }
+      }}
+    >
+      {/* Pinned Cards */}
+      <div
+        className="pinned-cards"
+        ref={cardsRef}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          const fromId = e.dataTransfer.getData('text/plain');
+          if (fromId) {
+            const draggedIdx = tabs.findIndex(t => t.id === fromId);
+            if (draggedIdx !== -1 && draggedIdx !== tabs.length - 1) {
+              const newTabs = [...tabs];
+              const [moved] = newTabs.splice(draggedIdx, 1);
+              newTabs.push(moved);
+              setTabs(newTabs);
+              saveState(newTabs, activeTabId);
+            }
+            setDraggedTabId(null);
+          }
+        }}
+      >
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''}`}
-            style={{ borderTopColor: tab.color }}
-            onClick={() => {
-              if (focusMode && !isCollapsed) {
-                collapseWindow();
-              } else {
-                switchTab(tab.id);
-              }
-            }}
+            className={`card ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''}`}
+            style={{ borderColor: tab.color }}
+            title={tab.path}
+            onClick={() => switchTab(tab.id)}
             draggable
             onDragStart={(e) => {
               setDraggedTabId(tab.id);
               e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', tab.id);
             }}
             onDragOver={(e) => {
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
             }}
             onDragEnd={() => setDraggedTabId(null)}
-            onDrop={() => {
-              if (draggedTabId && draggedTabId !== tab.id) {
-                reorderTabs(draggedTabId, tab.id);
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const fromId = e.dataTransfer.getData('text/plain');
+              if (fromId && fromId !== tab.id) {
+                reorderTabs(fromId, tab.id);
               }
               setDraggedTabId(null);
             }}
@@ -680,38 +826,13 @@ function App() {
               }
             }}
           >
-            <button
-              className={`tab-copy ${copiedPath === tab.path ? 'copied' : ''}`}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await writeText(tab.path);
-                  setCopiedPath(tab.path);
-                  if (focusMode && !isCollapsed) {
-                    setTimeout(() => collapseWindow(), 200);
-                  }
-                  setTimeout(() => setCopiedPath(null), 400);
-                } catch (err) {
-                  console.error('Copy failed:', err);
-                }
-              }}
-              title={`Copy: ${tab.path}`}
-            >
-              {copiedPath === tab.path ? (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-              ) : (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
-              )}
-            </button>
-            <span className="tab-name">{tab.name}</span>
+            <svg className="card-icon" viewBox="0 0 24 24" fill={tab.color}>
+              <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+            </svg>
+            <span className="card-name">{tab.name}</span>
             {tabs.length > 1 && (
               <button
-                className="tab-close"
+                className="card-close"
                 onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
               >
                 ×
@@ -719,19 +840,21 @@ function App() {
             )}
           </div>
         ))}
-        <button className="tab-add" onClick={() => currentPath && openInNewTab(currentPath)}>
-          +
+        <button className="card-add" onClick={() => currentPath && openInNewTab(currentPath)} title="Pin current folder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
         </button>
         <button
-          className={`focus-mode-btn ${focusMode ? 'active' : ''}`}
+          className={`focus-toggle ${focusMode ? 'active' : ''}`}
           onClick={toggleFocusMode}
-          title={focusMode ? "Exit focus mode (⌘⇧F)" : "Enter focus mode (⌘⇧F)"}
+          title={focusMode ? "Exit focus mode (⌘⇧F)" : "Focus mode (⌘⇧F)"}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             {focusMode ? (
               <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
             ) : (
-              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
             )}
           </svg>
         </button>
@@ -773,7 +896,7 @@ function App() {
         <input
           type="text"
           className="search-input"
-          placeholder={useIndexSearch ? `Search ${indexCount.toLocaleString()} indexed files and folders...` : "Search current folder..."}
+          placeholder={useIndexSearch ? `Search ${indexCount.toLocaleString()} files...` : "Search folder..."}
           value={searchQuery}
           onChange={(e) => { setSearchQuery(e.target.value); setSelectedIndex(0); }}
           onKeyDown={(e) => {
@@ -790,22 +913,6 @@ function App() {
             </svg>
           </button>
         )}
-        <button
-          className={`toolbar-btn ${showPaths ? 'active' : ''}`}
-          onClick={togglePaths}
-          title={showPaths ? "Hide full paths" : "Show full paths"}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 6h18M3 12h18M3 18h18" />
-          </svg>
-        </button>
-        <button
-          className={`toolbar-btn ${useIndexSearch ? 'active' : ''}`}
-          onClick={() => setUseIndexSearch(!useIndexSearch)}
-          title={useIndexSearch ? "Search all indexed files" : "Search current folder only"}
-        >
-          {useIndexSearch ? '~' : './'}
-        </button>
         <button
           className="theme-toggle"
           onClick={() => changeTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
@@ -829,8 +936,8 @@ function App() {
         </button>
         <button className="settings-button" onClick={() => setShowSettings(true)} title="Settings">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
             <circle cx="12" cy="12" r="3" />
+            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
           </svg>
         </button>
       </div>
@@ -857,8 +964,8 @@ function App() {
               );
             }
 
-            const folders = indexedResults.filter(e => e.is_directory);
-            const files = indexedResults.filter(e => !e.is_directory);
+            const folders = indexedGroups.folders;
+            const files = indexedGroups.files;
             let globalIndex = 0;
 
             return (
@@ -1003,7 +1110,7 @@ function App() {
             onClick={async () => {
               await writeText(tabContextMenu.tab.path);
               setCopiedPath(tabContextMenu.tab.path);
-              setTimeout(() => setCopiedPath(null), 400);
+              scheduleCopyReset(400);
               setTabContextMenu(null);
             }}
           >
@@ -1077,6 +1184,36 @@ function App() {
                     </svg>
                     System
                   </button>
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <label className="settings-label">Display</label>
+                <div className="settings-toggles">
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showPaths}
+                      onChange={() => togglePaths()}
+                    />
+                    <span>Show full file paths</span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={useIndexSearch}
+                      onChange={() => setUseIndexSearch(!useIndexSearch)}
+                    />
+                    <span>Search all indexed files (not just current folder)</span>
+                  </label>
+                </div>
+                <div className="settings-zoom">
+                  <span className="settings-zoom-label">Zoom: {Math.round(appZoom * 100)}%</span>
+                  <div className="settings-zoom-controls">
+                    <button onClick={() => setAppZoom(z => Math.max(0.7, z - 0.1))}>−</button>
+                    <button onClick={() => setAppZoom(1)}>Reset</button>
+                    <button onClick={() => setAppZoom(z => Math.min(1.5, z + 0.1))}>+</button>
+                  </div>
                 </div>
               </div>
 
