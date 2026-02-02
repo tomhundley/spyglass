@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import Fuse from 'fuse.js';
 import './App.css';
@@ -22,6 +23,12 @@ interface ContextMenu {
   x: number;
   y: number;
   entry: FileEntry;
+}
+
+interface TabContextMenu {
+  x: number;
+  y: number;
+  tab: Tab;
 }
 
 interface IndexEntry {
@@ -68,6 +75,7 @@ function App() {
   const [showPaths, setShowPaths] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenu | null>(null);
   const expandedSizeRef = useRef({ width: 700, height: 600 });
   const collapsedHeightRef = useRef(100);
 
@@ -179,6 +187,28 @@ function App() {
       await collapseWindow();
     }
   }, [focusMode, collapseWindow, expandWindow]);
+
+  // Open path in new window
+  const openInNewWindow = useCallback(async (path: string) => {
+    const windowId = `spyglass-${generateId()}`;
+    const name = path.split('/').pop() || 'Spyglass';
+    // Store path for new window to pick up
+    localStorage.setItem(`spyglass-new-window-${windowId}`, path);
+    try {
+      const webview = new WebviewWindow(windowId, {
+        url: `${window.location.origin}?windowId=${windowId}`,
+        title: `Spyglass - ${name}`,
+        width: 700,
+        height: 600,
+        center: true,
+      });
+      webview.once('tauri://error', (e: unknown) => {
+        console.error('Failed to create window:', e);
+      });
+    } catch (e) {
+      console.error('Failed to open new window:', e);
+    }
+  }, []);
 
   // Save collapsed height when user resizes in focus mode
   useEffect(() => {
@@ -432,6 +462,30 @@ function App() {
 
     async function init() {
       try {
+        // Check for windowId in URL (for new windows)
+        const urlParams = new URLSearchParams(window.location.search);
+        const windowId = urlParams.get('windowId');
+
+        if (windowId && mounted) {
+          // New window - get path from localStorage
+          const storedPath = localStorage.getItem(`spyglass-new-window-${windowId}`);
+          localStorage.removeItem(`spyglass-new-window-${windowId}`); // Clean up
+
+          if (storedPath) {
+            const name = storedPath.split('/').pop() || '~';
+            const initialTab: Tab = {
+              id: generateId(),
+              path: storedPath,
+              name,
+              color: TAB_COLORS[0],
+            };
+            setTabs([initialTab]);
+            setActiveTabId(initialTab.id);
+            await loadDirectory(storedPath);
+            return;
+          }
+        }
+
         const cfg = await invoke<any>('load_config');
 
         if (mounted) {
@@ -543,10 +597,11 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [filteredEntries, selectedIndex, handleCopy, navigateTo, navigateBack, contextMenu, currentPath, openInNewTab, closeTab, activeTabId, toggleFocusMode]);
 
-  // Close context menu on click outside
+  // Close context menus on click outside
   useEffect(() => {
     function onClick() {
       setContextMenu(null);
+      setTabContextMenu(null);
     }
     window.addEventListener('click', onClick);
     return () => window.removeEventListener('click', onClick);
@@ -567,8 +622,10 @@ function App() {
   // Handle context menu
   const handleContextMenu = useCallback((e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, entry });
-  }, []);
+    if (!focusMode) {
+      setContextMenu({ x: e.clientX, y: e.clientY, entry });
+    }
+  }, [focusMode]);
 
   // Build breadcrumb segments
   const breadcrumbSegments = useMemo(() => {
@@ -584,7 +641,7 @@ function App() {
   }, [currentPath]);
 
   return (
-    <div className={`app ${focusMode && isCollapsed ? 'focus-mode' : ''}`} onClick={() => setContextMenu(null)}>
+    <div className={`app ${focusMode ? 'focus-mode' : ''} ${focusMode && isCollapsed ? 'collapsed' : ''}`} onClick={() => { setContextMenu(null); setTabContextMenu(null); }}>
       {/* Tab Bar */}
       <div className="tab-bar">
         {tabs.map((tab) => (
@@ -592,7 +649,13 @@ function App() {
             key={tab.id}
             className={`tab ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''}`}
             style={{ borderTopColor: tab.color }}
-            onClick={() => switchTab(tab.id)}
+            onClick={() => {
+              if (focusMode && !isCollapsed) {
+                collapseWindow();
+              } else {
+                switchTab(tab.id);
+              }
+            }}
             draggable
             onDragStart={(e) => {
               setDraggedTabId(tab.id);
@@ -612,29 +675,39 @@ function App() {
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              // Show color picker
-              const rect = (e.target as HTMLElement).getBoundingClientRect();
-              const colorPicker = document.createElement('div');
-              colorPicker.className = 'color-picker';
-              colorPicker.style.left = rect.left + 'px';
-              colorPicker.style.top = rect.bottom + 'px';
-              TAB_COLORS.forEach(color => {
-                const swatch = document.createElement('div');
-                swatch.className = 'color-swatch';
-                swatch.style.backgroundColor = color;
-                swatch.onclick = () => {
-                  changeTabColor(tab.id, color);
-                  colorPicker.remove();
-                };
-                colorPicker.appendChild(swatch);
-              });
-              document.body.appendChild(colorPicker);
-              setTimeout(() => {
-                const remove = () => { colorPicker.remove(); document.removeEventListener('click', remove); };
-                document.addEventListener('click', remove);
-              }, 10);
+              if (!focusMode) {
+                setTabContextMenu({ x: e.clientX, y: e.clientY, tab });
+              }
             }}
           >
+            <button
+              className={`tab-copy ${copiedPath === tab.path ? 'copied' : ''}`}
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  await writeText(tab.path);
+                  setCopiedPath(tab.path);
+                  if (focusMode && !isCollapsed) {
+                    setTimeout(() => collapseWindow(), 200);
+                  }
+                  setTimeout(() => setCopiedPath(null), 400);
+                } catch (err) {
+                  console.error('Copy failed:', err);
+                }
+              }}
+              title={`Copy: ${tab.path}`}
+            >
+              {copiedPath === tab.path ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              )}
+            </button>
             <span className="tab-name">{tab.name}</span>
             {tabs.length > 1 && (
               <button
@@ -900,13 +973,62 @@ function App() {
             Copy Path
           </div>
           {contextMenu.entry.is_directory && (
-            <div
-              className="context-menu-item"
-              onClick={() => { openInNewTab(contextMenu.entry.path); setContextMenu(null); }}
-            >
-              Open in New Tab
-            </div>
+            <>
+              <div
+                className="context-menu-item"
+                onClick={() => { openInNewTab(contextMenu.entry.path); setContextMenu(null); }}
+              >
+                Open in New Tab
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => { openInNewWindow(contextMenu.entry.path); setContextMenu(null); }}
+              >
+                Open in New Window
+              </div>
+            </>
           )}
+        </div>
+      )}
+
+      {/* Tab Context Menu */}
+      {tabContextMenu && (
+        <div
+          className="context-menu tab-context-menu"
+          style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="context-menu-item"
+            onClick={async () => {
+              await writeText(tabContextMenu.tab.path);
+              setCopiedPath(tabContextMenu.tab.path);
+              setTimeout(() => setCopiedPath(null), 400);
+              setTabContextMenu(null);
+            }}
+          >
+            Copy Path
+          </div>
+          <div
+            className="context-menu-item"
+            onClick={() => { openInNewWindow(tabContextMenu.tab.path); setTabContextMenu(null); }}
+          >
+            Open in New Window
+          </div>
+          <div className="context-menu-divider" />
+          <div className="context-menu-colors">
+            {TAB_COLORS.map(color => (
+              <div
+                key={color}
+                className={`color-swatch ${tabContextMenu.tab.color === color ? 'active' : ''}`}
+                style={{ backgroundColor: color }}
+                onClick={() => {
+                  changeTabColor(tabContextMenu.tab.id, color);
+                  setTabContextMenu(null);
+                }}
+              />
+            ))}
+          </div>
         </div>
       )}
 
