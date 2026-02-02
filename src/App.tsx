@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import Fuse from 'fuse.js';
 import './App.css';
@@ -309,6 +310,22 @@ function App() {
     const applyTheme = (isDark: boolean) => {
       root.setAttribute('data-theme', isDark ? 'dark' : 'light');
     };
+
+    const syncWindowTheme = async () => {
+      const appWindow = getCurrentWindow();
+      try {
+        if (theme === 'system') {
+          // null = follow system theme
+          await appWindow.setTheme(null);
+        } else {
+          await appWindow.setTheme(theme);
+        }
+      } catch (e) {
+        console.error('Failed to set window theme:', e);
+      }
+    };
+
+    syncWindowTheme();
 
     if (theme === 'system') {
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
