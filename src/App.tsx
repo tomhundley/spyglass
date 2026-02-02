@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import Fuse from 'fuse.js';
 import './App.css';
@@ -16,11 +16,6 @@ interface Tab {
   path: string;
   name: string;
   color: string;
-}
-
-interface AppState {
-  tabs: Tab[];
-  activeTabId: string;
 }
 
 interface ContextMenu {
@@ -71,6 +66,10 @@ function App() {
   const [useIndexSearch, setUseIndexSearch] = useState(true);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [showPaths, setShowPaths] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const expandedSizeRef = useRef({ width: 700, height: 600 });
+  const collapsedHeightRef = useRef(100);
 
   const activeTab = tabs.find(t => t.id === activeTabId);
   const currentPath = activeTab?.path || '';
@@ -146,16 +145,79 @@ function App() {
     }
   }, [currentPath, navigateTo]);
 
+  // Focus mode window operations
+  const collapseWindow = useCallback(async () => {
+    const win = getCurrentWindow();
+    try {
+      const size = await win.innerSize();
+      expandedSizeRef.current = { width: size.width, height: size.height };
+      await win.setSize(new LogicalSize(size.width, collapsedHeightRef.current));
+      setIsCollapsed(true);
+    } catch (e) {
+      console.error('Failed to collapse window:', e);
+    }
+  }, []);
+
+  const expandWindow = useCallback(async () => {
+    const win = getCurrentWindow();
+    try {
+      await win.setSize(new LogicalSize(expandedSizeRef.current.width, expandedSizeRef.current.height));
+      setIsCollapsed(false);
+    } catch (e) {
+      console.error('Failed to expand window:', e);
+    }
+  }, []);
+
+  const toggleFocusMode = useCallback(async () => {
+    if (focusMode) {
+      // Exiting focus mode - expand and disable
+      await expandWindow();
+      setFocusMode(false);
+    } else {
+      // Entering focus mode - collapse and enable
+      setFocusMode(true);
+      await collapseWindow();
+    }
+  }, [focusMode, collapseWindow, expandWindow]);
+
+  // Save collapsed height when user resizes in focus mode
+  useEffect(() => {
+    if (!focusMode || !isCollapsed) return;
+
+    let resizeTimeout: ReturnType<typeof setTimeout>;
+    const handleResize = async () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(async () => {
+        try {
+          const win = getCurrentWindow();
+          const size = await win.innerSize();
+          collapsedHeightRef.current = size.height;
+        } catch (e) {
+          console.error('Failed to save collapsed height:', e);
+        }
+      }, 200);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(resizeTimeout);
+    };
+  }, [focusMode, isCollapsed]);
+
   // Handle copy
   const handleCopy = useCallback(async (entry: FileEntry) => {
     try {
       await writeText(entry.path);
       setCopiedPath(entry.path);
+      if (focusMode && !isCollapsed) {
+        setTimeout(() => collapseWindow(), 200);
+      }
       setTimeout(() => setCopiedPath(null), 200);
     } catch (e) {
       console.error('Copy failed:', e);
     }
-  }, []);
+  }, [focusMode, isCollapsed, collapseWindow]);
 
   // Open in new tab
   const openInNewTab = useCallback((path: string, color?: string) => {
@@ -194,11 +256,14 @@ function App() {
   const switchTab = useCallback((tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
     if (tab) {
+      if (focusMode && isCollapsed) {
+        expandWindow();
+      }
       setActiveTabId(tabId);
       loadDirectory(tab.path);
       saveState(tabs, tabId);
     }
-  }, [tabs, loadDirectory, saveState]);
+  }, [tabs, loadDirectory, saveState, focusMode, isCollapsed, expandWindow]);
 
   // Change tab color
   const changeTabColor = useCallback((tabId: string, color: string) => {
@@ -468,12 +533,15 @@ function App() {
       } else if (e.key === 'w' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         if (activeTabId) closeTab(activeTabId);
+      } else if (e.key === 'f' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+        e.preventDefault();
+        toggleFocusMode();
       }
     }
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [filteredEntries, selectedIndex, handleCopy, navigateTo, navigateBack, contextMenu, currentPath, openInNewTab, closeTab, activeTabId]);
+  }, [filteredEntries, selectedIndex, handleCopy, navigateTo, navigateBack, contextMenu, currentPath, openInNewTab, closeTab, activeTabId, toggleFocusMode]);
 
   // Close context menu on click outside
   useEffect(() => {
@@ -516,7 +584,7 @@ function App() {
   }, [currentPath]);
 
   return (
-    <div className="app" onClick={() => setContextMenu(null)}>
+    <div className={`app ${focusMode && isCollapsed ? 'focus-mode' : ''}`} onClick={() => setContextMenu(null)}>
       {/* Tab Bar */}
       <div className="tab-bar">
         {tabs.map((tab) => (
@@ -580,6 +648,19 @@ function App() {
         ))}
         <button className="tab-add" onClick={() => currentPath && openInNewTab(currentPath)}>
           +
+        </button>
+        <button
+          className={`focus-mode-btn ${focusMode ? 'active' : ''}`}
+          onClick={toggleFocusMode}
+          title={focusMode ? "Exit focus mode (⌘⇧F)" : "Enter focus mode (⌘⇧F)"}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            {focusMode ? (
+              <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
+            ) : (
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+            )}
+          </svg>
         </button>
       </div>
 

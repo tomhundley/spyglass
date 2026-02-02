@@ -1014,3 +1014,118 @@ body {
   width: 24px;
   height: 24px;
 }
+
+/* Focus Mode Button */
+.focus-mode-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-left: auto;
+}
+
+.focus-mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  transform: scale(1.1);
+}
+
+.focus-mode-btn:active {
+  transform: scale(0.95);
+}
+
+.focus-mode-btn.active {
+  background: var(--accent-color);
+  color: white;
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+.focus-mode-btn.active:hover {
+  background: var(--accent-hover);
+}
+
+/* Focus Mode Transitions - elements that will animate */
+.breadcrumb,
+.search-bar,
+.file-list {
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tab-bar {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Focus Mode Styles */
+.app.focus-mode .breadcrumb,
+.app.focus-mode .search-bar {
+  opacity: 0;
+  transform: translateY(-10px);
+  max-height: 0;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  border: none;
+}
+
+.app.focus-mode .file-list {
+  opacity: 0;
+  transform: translateY(20px);
+  max-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.app.focus-mode .tab-bar {
+  border-bottom: none;
+  justify-content: center;
+  padding: 8px 16px;
+  background: var(--bg-primary);
+}
+
+.app.focus-mode .tab {
+  padding: 10px 20px;
+  font-size: 13px;
+  transform: scale(1.05);
+  box-shadow: var(--shadow-sm);
+}
+
+.app.focus-mode .tab:hover {
+  transform: scale(1.1) translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.app.focus-mode .tab.active {
+  transform: scale(1.08);
+  box-shadow: var(--shadow-md);
+}
+
+.app.focus-mode .tab-add,
+.app.focus-mode .focus-mode-btn {
+  position: absolute;
+  opacity: 0.4;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.app.focus-mode .tab-add {
+  right: 50px;
+}
+
+.app.focus-mode .focus-mode-btn {
+  right: 12px;
+}
+
+.app.focus-mode .tab-add:hover,
+.app.focus-mode .focus-mode-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
