@@ -263,11 +263,16 @@ function App() {
   }, []);
 
   const startCollapseTimer = useCallback(() => {
-    // Don't collapse if context menu is open
+    // Don't start timer if context menu is open
     if (contextMenu || tabContextMenu) return;
 
     cancelCollapseTimer();
     collapseTimeoutRef.current = setTimeout(async () => {
+      // Re-check context menu state when timer fires (not stale closure)
+      // We access the refs indirectly through a check that will be current
+      const menuElement = document.querySelector('.context-menu');
+      if (menuElement) return; // Context menu still open, don't collapse
+
       // Save current expanded size before collapsing
       try {
         const win = getCurrentWindow();
@@ -542,13 +547,26 @@ function App() {
   // Handle card click in focus mode
   const handleFocusCardClick = useCallback(async (tab: Tab) => {
     cancelCollapseTimer();
+
+    // If clicking the already-expanded card, just cancel the timer (don't re-expand)
+    if (expandedCardId === tab.id) {
+      return;
+    }
+
+    // If already expanded (switching cards), don't resize - just switch content
+    const wasAlreadyExpanded = expandedCardId !== null;
+
     setExpandedCardId(tab.id);
     setActiveTabId(tab.id);
     loadDirectory(tab.path);
     saveState(tabs, tab.id);
-    const expandedSize = getStoredSize('spyglass-focus-expanded-size', 700, 500);
-    resizeWindowTo(expandedSize.width, expandedSize.height);
-  }, [cancelCollapseTimer, loadDirectory, tabs, saveState, getStoredSize, resizeWindowTo]);
+
+    // Only resize if expanding from collapsed state
+    if (!wasAlreadyExpanded) {
+      const expandedSize = getStoredSize('spyglass-focus-expanded-size', 700, 500);
+      resizeWindowTo(expandedSize.width, expandedSize.height);
+    }
+  }, [cancelCollapseTimer, expandedCardId, loadDirectory, tabs, saveState, getStoredSize, resizeWindowTo]);
 
   // Initialize
   useEffect(() => {
@@ -656,15 +674,40 @@ function App() {
     }
 
     if (e.key === 'ArrowLeft') {
-      navigateBack();
+      // Only navigate back if not in collapsed focus mode
+      if (!isCollapsed) {
+        navigateBack();
+      }
     } else if (e.key === 'Escape') {
-      setSearchQuery('');
+      if (focusMode) {
+        // In focus mode, Escape exits expanded state
+        if (expandedCardId) {
+          cancelCollapseTimer();
+          // Save expanded size before collapsing
+          (async () => {
+            try {
+              const win = getCurrentWindow();
+              const size = await win.innerSize();
+              localStorage.setItem('spyglass-focus-expanded-size', JSON.stringify({ width: size.width, height: size.height }));
+            } catch (err) {
+              console.error('Failed to save expanded size:', err);
+            }
+            setExpandedCardId(null);
+            const collapsedSize = getStoredSize('spyglass-focus-collapsed-size', 400, 60);
+            resizeWindowTo(collapsedSize.width, collapsedSize.height);
+          })();
+        }
+      } else {
+        setSearchQuery('');
+      }
     } else if (e.key === 't' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      if (currentPath) openInNewTab(currentPath);
+      // Don't allow new tabs in focus mode
+      if (!focusMode && currentPath) openInNewTab(currentPath);
     } else if (e.key === 'w' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      if (activeTabId) closeTab(activeTabId);
+      // Don't allow closing tabs in focus mode
+      if (!focusMode && activeTabId) closeTab(activeTabId);
     } else if ((e.key === '=' || e.key === '+') && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       setAppZoom(z => Math.min(1.5, z + 0.1));
@@ -682,6 +725,12 @@ function App() {
     openInNewTab,
     activeTabId,
     closeTab,
+    focusMode,
+    isCollapsed,
+    expandedCardId,
+    cancelCollapseTimer,
+    getStoredSize,
+    resizeWindowTo,
   ]);
 
   useEffect(() => {
@@ -739,6 +788,8 @@ function App() {
       {/* Pinned Cards */}
       <div
         className="pinned-cards"
+        onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
+        onMouseLeave={isExpanded ? startCollapseTimer : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
@@ -1139,6 +1190,7 @@ function App() {
           className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
+          onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
         >
           <div
             className="context-menu-item"
@@ -1171,6 +1223,7 @@ function App() {
           className="context-menu tab-context-menu"
           style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
+          onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
         >
           <div
             className="context-menu-item"
@@ -1208,7 +1261,7 @@ function App() {
 
       {/* Settings Panel */}
       {showSettings && (
-        <div className="settings-overlay" onClick={() => setShowSettings(false)}>
+        <div className="settings-overlay" onClick={() => setShowSettings(false)} onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}>
           <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
             <div className="settings-header">
               <h2>Settings</h2>
