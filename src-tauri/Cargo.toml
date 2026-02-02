@@ -1,0 +1,24 @@
+[package]
+name = "spyglass"
+version = "0.1.0"
+description = "A lightning-fast, minimal file explorer for copying paths"
+authors = ["Tom Hundley"]
+edition = "2021"
+
+[lib]
+name = "spyglass_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "=2.9.1", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
