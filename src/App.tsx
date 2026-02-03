@@ -768,21 +768,6 @@ function App() {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
         }}
-        onDrop={(e) => {
-          e.preventDefault();
-          const fromId = e.dataTransfer.getData('text/plain');
-          if (fromId) {
-            const draggedIdx = tabs.findIndex(t => t.id === fromId);
-            if (draggedIdx !== -1 && draggedIdx !== tabs.length - 1) {
-              const newTabs = [...tabs];
-              const [moved] = newTabs.splice(draggedIdx, 1);
-              newTabs.push(moved);
-              setTabs(newTabs);
-              saveState(newTabs, activeTabId);
-            }
-            setDraggedTabId(null);
-          }
-        }}
       >
         {tabs.map((tab) => (
           <div
@@ -1232,6 +1217,42 @@ function App() {
             Open in New Window
           </div>
           <div className="context-menu-divider" />
+          {(() => {
+            const idx = tabs.findIndex(t => t.id === tabContextMenu.tab.id);
+            return (
+              <>
+                {idx > 0 && (
+                  <div
+                    className="context-menu-item"
+                    onClick={() => {
+                      const newTabs = [...tabs];
+                      [newTabs[idx - 1], newTabs[idx]] = [newTabs[idx], newTabs[idx - 1]];
+                      setTabs(newTabs);
+                      saveState(newTabs, activeTabId);
+                      setTabContextMenu(null);
+                    }}
+                  >
+                    Move Left
+                  </div>
+                )}
+                {idx < tabs.length - 1 && (
+                  <div
+                    className="context-menu-item"
+                    onClick={() => {
+                      const newTabs = [...tabs];
+                      [newTabs[idx], newTabs[idx + 1]] = [newTabs[idx + 1], newTabs[idx]];
+                      setTabs(newTabs);
+                      saveState(newTabs, activeTabId);
+                      setTabContextMenu(null);
+                    }}
+                  >
+                    Move Right
+                  </div>
+                )}
+                <div className="context-menu-divider" />
+              </>
+            );
+          })()}
           <div className="context-menu-colors">
             {TAB_COLORS.map(color => (
               <div
