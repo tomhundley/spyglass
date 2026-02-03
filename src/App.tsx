@@ -174,12 +174,12 @@ function App() {
     }
   }, []);
 
-  // Navigate to path in current tab
+  // Navigate to path in current tab (keep original pinned name)
   const navigateTo = useCallback(async (path: string) => {
     if (!activeTabId) return;
-    const name = path.split('/').pop() || '~';
+    // Don't update name - keep the original pinned folder name
     const newTabs = tabs.map(t =>
-      t.id === activeTabId ? { ...t, path, name } : t
+      t.id === activeTabId ? { ...t, path } : t
     );
     setTabs(newTabs);
     saveState(newTabs, activeTabId);
@@ -262,32 +262,6 @@ function App() {
     }
   }, []);
 
-  const startCollapseTimer = useCallback(() => {
-    // Don't start timer if context menu is open
-    if (contextMenu || tabContextMenu) return;
-
-    cancelCollapseTimer();
-    collapseTimeoutRef.current = setTimeout(async () => {
-      // Re-check context menu state when timer fires (not stale closure)
-      // We access the refs indirectly through a check that will be current
-      const menuElement = document.querySelector('.context-menu');
-      if (menuElement) return; // Context menu still open, don't collapse
-
-      // Save current expanded size before collapsing
-      try {
-        const win = getCurrentWindow();
-        const size = await win.innerSize();
-        localStorage.setItem('spyglass-focus-expanded-size', JSON.stringify({ width: size.width, height: size.height }));
-      } catch (e) {
-        console.error('Failed to save expanded size:', e);
-      }
-
-      // Collapse
-      setExpandedCardId(null);
-      const collapsedSize = getStoredSize('spyglass-focus-collapsed-size', 400, 60);
-      resizeWindowTo(collapsedSize.width, collapsedSize.height);
-    }, 300);
-  }, [contextMenu, tabContextMenu, cancelCollapseTimer, getStoredSize, resizeWindowTo]);
 
 
   // Handle copy
@@ -788,8 +762,6 @@ function App() {
       {/* Pinned Cards */}
       <div
         className="pinned-cards"
-        onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
-        onMouseLeave={isExpanded ? startCollapseTimer : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
@@ -978,13 +950,9 @@ function App() {
         </>
       )}
 
-      {/* Focus mode expanded: breadcrumb + file list with mouse tracking */}
+      {/* Focus mode expanded: breadcrumb + file list */}
       {isExpanded && (
-        <div
-          className="expanded-content-area"
-          onMouseEnter={cancelCollapseTimer}
-          onMouseLeave={startCollapseTimer}
-        >
+        <div className="expanded-content-area">
           {/* Breadcrumb */}
           <div className="breadcrumb">
             <button
@@ -1190,7 +1158,6 @@ function App() {
           className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
-          onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
         >
           <div
             className="context-menu-item"
@@ -1223,7 +1190,6 @@ function App() {
           className="context-menu tab-context-menu"
           style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
-          onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}
         >
           <div
             className="context-menu-item"
@@ -1261,7 +1227,7 @@ function App() {
 
       {/* Settings Panel */}
       {showSettings && (
-        <div className="settings-overlay" onClick={() => setShowSettings(false)} onMouseEnter={isExpanded ? cancelCollapseTimer : undefined}>
+        <div className="settings-overlay" onClick={() => setShowSettings(false)}>
           <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
             <div className="settings-header">
               <h2>Settings</h2>

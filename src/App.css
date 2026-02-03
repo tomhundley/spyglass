@@ -1242,6 +1242,8 @@ body {
   border: 1px solid transparent;
   box-shadow: none;
   transition: all 0.2s ease-in-out;
+  max-width: none;
+  min-width: auto;
 }
 
 .app.focus-mode.collapsed .card:hover {
@@ -1269,6 +1271,10 @@ body {
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
 }
 
 .app.focus-mode.collapsed .focus-toggle {
@@ -1331,6 +1337,10 @@ body {
 .app.focus-mode.expanded .card-name {
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
 }
 
 /* Active/expanded card indicator */
