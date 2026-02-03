@@ -64,7 +64,8 @@ function App() {
     const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
-  const [justDragged, setJustDragged] = useState(false);
+  const dragStartPos = useRef<{ x: number; y: number } | null>(null);
+  const wasDragging = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [indexCount, setIndexCount] = useState(0);
@@ -789,10 +790,26 @@ function App() {
             className={`card ${tab.id === activeTabId ? 'active' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${draggedTabId && draggedTabId !== tab.id ? 'drop-target' : ''} ${expandedCardId === tab.id ? 'expanded-active' : ''}`}
             style={{ borderColor: tab.color }}
             title={tab.path}
+            onMouseDown={(e) => {
+              dragStartPos.current = { x: e.clientX, y: e.clientY };
+              wasDragging.current = false;
+            }}
+            onMouseUp={(e) => {
+              // Check if this was a drag or a click
+              if (dragStartPos.current) {
+                const dx = Math.abs(e.clientX - dragStartPos.current.x);
+                const dy = Math.abs(e.clientY - dragStartPos.current.y);
+                // If moved more than 5px, it was a drag
+                if (dx > 5 || dy > 5) {
+                  wasDragging.current = true;
+                }
+              }
+              dragStartPos.current = null;
+            }}
             onClick={(e) => {
               // Skip click if we just finished dragging
-              if (justDragged) {
-                setJustDragged(false);
+              if (wasDragging.current) {
+                wasDragging.current = false;
                 return;
               }
               if (focusMode) {
@@ -804,6 +821,7 @@ function App() {
             }}
             draggable
             onDragStart={(e) => {
+              wasDragging.current = true;
               setDraggedTabId(tab.id);
               e.dataTransfer.effectAllowed = 'move';
               e.dataTransfer.setData('text/plain', tab.id);
@@ -814,9 +832,6 @@ function App() {
             }}
             onDragEnd={() => {
               setDraggedTabId(null);
-              setJustDragged(true);
-              // Reset the flag after a short delay so future clicks work
-              setTimeout(() => setJustDragged(false), 100);
             }}
             onDrop={(e) => {
               e.preventDefault();
