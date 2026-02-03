@@ -1217,42 +1217,41 @@ function App() {
             Open in New Window
           </div>
           <div className="context-menu-divider" />
-          {(() => {
-            const idx = tabs.findIndex(t => t.id === tabContextMenu.tab.id);
-            return (
-              <>
-                {idx > 0 && (
-                  <div
-                    className="context-menu-item"
-                    onClick={() => {
-                      const newTabs = [...tabs];
-                      [newTabs[idx - 1], newTabs[idx]] = [newTabs[idx], newTabs[idx - 1]];
-                      setTabs(newTabs);
-                      saveState(newTabs, activeTabId);
-                      setTabContextMenu(null);
-                    }}
-                  >
-                    Move Left
-                  </div>
-                )}
-                {idx < tabs.length - 1 && (
-                  <div
-                    className="context-menu-item"
-                    onClick={() => {
-                      const newTabs = [...tabs];
-                      [newTabs[idx], newTabs[idx + 1]] = [newTabs[idx + 1], newTabs[idx]];
-                      setTabs(newTabs);
-                      saveState(newTabs, activeTabId);
-                      setTabContextMenu(null);
-                    }}
-                  >
-                    Move Right
-                  </div>
-                )}
-                <div className="context-menu-divider" />
-              </>
-            );
-          })()}
+          {tabs.length > 1 && (
+            <>
+              <div
+                className={`context-menu-item ${tabs.findIndex(t => t.id === tabContextMenu.tab.id) === 0 ? 'disabled' : ''}`}
+                onClick={() => {
+                  const idx = tabs.findIndex(t => t.id === tabContextMenu.tab.id);
+                  if (idx > 0) {
+                    const newTabs = [...tabs];
+                    [newTabs[idx - 1], newTabs[idx]] = [newTabs[idx], newTabs[idx - 1]];
+                    setTabs(newTabs);
+                    saveState(newTabs, activeTabId);
+                  }
+                  setTabContextMenu(null);
+                }}
+              >
+                ← Move Left
+              </div>
+              <div
+                className={`context-menu-item ${tabs.findIndex(t => t.id === tabContextMenu.tab.id) === tabs.length - 1 ? 'disabled' : ''}`}
+                onClick={() => {
+                  const idx = tabs.findIndex(t => t.id === tabContextMenu.tab.id);
+                  if (idx < tabs.length - 1) {
+                    const newTabs = [...tabs];
+                    [newTabs[idx], newTabs[idx + 1]] = [newTabs[idx + 1], newTabs[idx]];
+                    setTabs(newTabs);
+                    saveState(newTabs, activeTabId);
+                  }
+                  setTabContextMenu(null);
+                }}
+              >
+                Move Right →
+              </div>
+              <div className="context-menu-divider" />
+            </>
+          )}
           <div className="context-menu-colors">
             {TAB_COLORS.map(color => (
               <div
