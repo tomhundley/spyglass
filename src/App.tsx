@@ -64,6 +64,7 @@ function App() {
     const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const [justDragged, setJustDragged] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [indexCount, setIndexCount] = useState(0);
@@ -789,6 +790,11 @@ function App() {
             style={{ borderColor: tab.color }}
             title={tab.path}
             onClick={(e) => {
+              // Skip click if we just finished dragging
+              if (justDragged) {
+                setJustDragged(false);
+                return;
+              }
               if (focusMode) {
                 e.stopPropagation();
                 handleFocusCardClick(tab);
@@ -806,7 +812,12 @@ function App() {
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
             }}
-            onDragEnd={() => setDraggedTabId(null)}
+            onDragEnd={() => {
+              setDraggedTabId(null);
+              setJustDragged(true);
+              // Reset the flag after a short delay so future clicks work
+              setTimeout(() => setJustDragged(false), 100);
+            }}
             onDrop={(e) => {
               e.preventDefault();
               e.stopPropagation();
