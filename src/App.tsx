@@ -796,21 +796,18 @@ function App() {
                 switchTab(tab.id);
               }
             }}
-            draggable={!focusMode}
+            draggable
             onDragStart={(e) => {
-              if (focusMode) return;
               setDraggedTabId(tab.id);
               e.dataTransfer.effectAllowed = 'move';
               e.dataTransfer.setData('text/plain', tab.id);
             }}
             onDragOver={(e) => {
-              if (focusMode) return;
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
             }}
             onDragEnd={() => setDraggedTabId(null)}
             onDrop={(e) => {
-              if (focusMode) return;
               e.preventDefault();
               e.stopPropagation();
               const fromId = e.dataTransfer.getData('text/plain');
